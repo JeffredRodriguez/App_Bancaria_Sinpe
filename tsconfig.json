@@ -1,0 +1,28 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "allowJs": false,
+    "jsx": "react-native",
+    "module": "esnext",
+    "baseUrl": "./",
+    "paths": {
+      "@/components/*": ["src/components/*"],
+      "@/screens/*": ["src/screens/*"],
+      "@/theme/*": ["src/theme/*"],
+      "@/navigation/*": ["src/navigation/*"],
+      "@/store/*": ["src/store/*"],
+      "@/utils/*": ["src/utils/*"],
+      "@expo/vector-icons": [
+        "node_modules/@expo/vector-icons"
+      ]
+    }
+  },
+  "include": [
+    "index.js",
+    "App.tsx",
+    "src/**/*",
+    "app/**/*",
+    "types/**/*"
+  ]
+}
