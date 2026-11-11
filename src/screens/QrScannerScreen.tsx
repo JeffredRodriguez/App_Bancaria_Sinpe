@@ -1,14 +1,9 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import type {
-  BarCodeScannerModule,
-  BarCodeScannerProps,
-  BarCodeScannerResult,
-  PermissionResponse,
-} from "expo-barcode-scanner";
+import { CameraView, useCameraPermissions } from "expo-camera";
+import type { BarcodeScanningResult } from "expo-camera";
 import { useRouter } from "expo-router";
 import { MotiView } from "moti";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ComponentType } from "react";
 import {
   ActivityIndicator,
   Platform,
@@ -18,111 +13,53 @@ import {
   Text,
   View,
 } from "react-native";
-import { NativeModulesProxy } from "expo-modules-core";
 
 import FuturisticBackground from "@/components/FuturisticBackground";
-import GlassCard from "@/components/GlassCard";
 import PrimaryButton from "@/components/PrimaryButton";
 import ProfileAvatarButton from "@/components/ProfileAvatarButton";
 import { palette } from "@/theme/colors";
 
-type ScannerModule = {
-  BarCodeScanner: ComponentType<BarCodeScannerProps>;
-  getPermissionsAsync?: () => Promise<PermissionResponse>;
-  requestPermissionsAsync: () => Promise<PermissionResponse>;
-};
-
 const QrScannerScreen = () => {
   const router = useRouter();
-  const [hasPermission, setHasPermission] = useState<null | boolean>(null);
+  const [permission, requestPermission] = useCameraPermissions();
+  const hasPermission = permission?.granted ?? null;
   const [scannedData, setScannedData] = useState<string | null>(null);
   const [scannerError, setScannerError] = useState<string | null>(null);
   const [requestingPermission, setRequestingPermission] = useState(false);
-  const barCodeScannerModuleRef = useRef<ScannerModule | null>(null);
-  const [scannerModule, setScannerModule] = useState<ScannerModule | null>(null);
-  const hasNativeScanner = Boolean(
-    (NativeModulesProxy as Record<string, unknown>)?.ExpoBarCodeScanner,
-  );
-
-  const loadScannerModule = useCallback(async () => {
-    if (!hasNativeScanner) {
-      throw new Error("native-module-missing");
-    }
-    if (barCodeScannerModuleRef.current) {
-      return barCodeScannerModuleRef.current;
-    }
-
-    const module = await import("expo-barcode-scanner");
-    const resolved: ScannerModule = {
-      BarCodeScanner: module.BarCodeScanner,
-      getPermissionsAsync: module.getPermissionsAsync,
-      requestPermissionsAsync: module.requestPermissionsAsync,
-    };
-    barCodeScannerModuleRef.current = resolved;
-    setScannerModule(resolved);
-    return resolved;
-  }, [hasNativeScanner]);
+  const permissionRequestStarted = useRef(false);
 
   useEffect(() => {
     let isMounted = true;
-    if (!hasNativeScanner) {
-      setHasPermission(false);
-      setScannerError(
-        "Este build de Expo Go no incluye el lector. Usa 'npm run start:classic' o un dev build personalizado."
-      );
+    if (!permission || permission.granted || permissionRequestStarted.current) {
       return () => {
         isMounted = false;
       };
     }
-    loadScannerModule()
-      .then(async (module) => {
-        const initial = module.getPermissionsAsync
-          ? await module.getPermissionsAsync()
-          : await module.requestPermissionsAsync();
+    if (!permission.canAskAgain) {
+      setScannerError("No tenemos permiso de cámara. Actívalo desde Ajustes para escanear.");
+      return;
+    }
 
-        if (!isMounted) {
-          return;
-        }
-
-        if (initial?.status === "granted" || initial?.granted) {
-          setHasPermission(true);
-          return;
-        }
-
-        setHasPermission(false);
-        if (initial?.canAskAgain === false) {
-          setScannerError(
-            "No tenemos permiso de cámara. Actívalo desde Ajustes para usar el escáner.",
-          );
-          return;
-        }
-
-        const requested = await module.requestPermissionsAsync();
-        if (!isMounted) {
-          return;
-        }
-
-        const granted = Boolean(requested?.status === "granted" || requested?.granted);
-        setHasPermission(granted);
-        if (!granted) {
+    permissionRequestStarted.current = true;
+    requestPermission()
+      .then((requested) => {
+        if (isMounted && !requested.granted) {
           setScannerError("Necesitas conceder acceso a la cámara para escanear códigos.");
         }
       })
       .catch(() => {
-        if (!isMounted) return;
-        setHasPermission(false);
-        setScannerError(
-          "El escáner no está disponible en Expo Go. Usa un build personalizado o 'npm run start:classic'."
-        );
+        if (isMounted) {
+          setScannerError("No se pudo solicitar el permiso de cámara. Intenta nuevamente.");
+        }
       });
     return () => {
       isMounted = false;
     };
-  }, [hasNativeScanner, loadScannerModule]);
+  }, [permission, requestPermission]);
 
   const parsed = useMemo(() => parsePayload(scannedData), [scannedData]);
 
-  const handleBarCodeScanned = ({ data }: BarCodeScannerResult) => {
+  const handleBarCodeScanned = ({ data }: BarcodeScanningResult) => {
     setScannedData(data);
   };
 
@@ -140,25 +77,13 @@ const QrScannerScreen = () => {
   };
 
   const scanningBlocked = hasPermission === false;
-  const ScannerComponent: ComponentType<BarCodeScannerProps> | null = hasNativeScanner
-    ? scannerModule?.BarCodeScanner ?? null
-    : null;
 
   const requestScannerPermission = useCallback(async () => {
     setScannerError(null);
-    if (!hasNativeScanner) {
-      setScannerError(
-        "Este build de Expo Go no incluye el lector. Usa 'npm run start:classic' o un dev build personalizado."
-      );
-      return;
-    }
     setRequestingPermission(true);
     try {
-      const module = await loadScannerModule();
-      const result = await module.requestPermissionsAsync();
-      const granted = Boolean(result?.status === "granted" || result?.granted);
-      setHasPermission(granted);
-      if (!granted) {
+      const result = await requestPermission();
+      if (!result.granted) {
         setScannerError(
           result?.canAskAgain === false
             ? "La cámara está bloqueada. Activa el permiso desde Ajustes para usar el escáner."
@@ -171,7 +96,7 @@ const QrScannerScreen = () => {
     } finally {
       setRequestingPermission(false);
     }
-  }, [hasNativeScanner, loadScannerModule]);
+  }, [requestPermission]);
 
   return (
     <FuturisticBackground>
@@ -228,7 +153,7 @@ const QrScannerScreen = () => {
                   Solicitando permisos de la cámara…
                 </Text>
               </View>
-            ) : scanningBlocked || !ScannerComponent ? (
+            ) : scanningBlocked ? (
               <View style={styles.permissionState}>
                 <MaterialCommunityIcons
                   name="lock-alert"
@@ -242,8 +167,8 @@ const QrScannerScreen = () => {
                 {scannerError ? null : (
                   <Text style={styles.permissionHint}>
                     {Platform.OS === "ios"
-                      ? "Ajustes > Expo Go > Cámara"
-                      : "Ajustes > Aplicaciones > Expo Go > Permisos"}
+                      ? "Ajustes > Privacidad y seguridad > Cámara"
+                      : "Ajustes > Aplicaciones > App bancaria SINPE > Permisos"}
                   </Text>
                 )}
                 <PrimaryButton
@@ -255,11 +180,11 @@ const QrScannerScreen = () => {
               </View>
             ) : (
               <View style={styles.cameraViewport}>
-                <ScannerComponent
-                  onBarCodeScanned={
-                    scannedData ? undefined : handleBarCodeScanned
-                  }
-                  style={StyleSheet.absoluteFillObject}
+                <CameraView
+                  facing="back"
+                  barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+                  onBarcodeScanned={scannedData ? undefined : handleBarCodeScanned}
+                  style={StyleSheet.absoluteFill}
                 />
                 <MotiView
                   pointerEvents="none"
@@ -464,7 +389,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(0,0,0,0.12)",

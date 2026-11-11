@@ -1,15 +1,9 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import type {
-  BarCodeScannerModule,
-  BarCodeScannerProps,
-  BarCodeScannerResult,
-  PermissionResponse,
-} from "expo-barcode-scanner";
+import { CameraView, useCameraPermissions } from "expo-camera";
+import type { BarcodeScanningResult } from "expo-camera";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { NativeModulesProxy } from "expo-modules-core";
 import { MotiView } from "moti";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ComponentType } from "react";
 import {
   ActivityIndicator,
   Image,
@@ -50,6 +44,7 @@ const MoneyTransferScreen = () => {
   const { themeName } = useTheme();
   const usesBrightVariant = themeName === "pionero" || themeName === "aurora";
   const { contacts, balance, envelopes, recordContactUsage } = useBankStore();
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
 
   const [contactName, setContactName] = useState("");
   const [phoneRaw, setPhoneRaw] = useState("");
@@ -64,42 +59,10 @@ const MoneyTransferScreen = () => {
   const [scannerError, setScannerError] = useState<string | null>(null);
   const [requestingPermission, setRequestingPermission] = useState(false);
   const hasHandledScan = useRef(false);
+  const cameraPermissionRequestStarted = useRef(false);
 
   const formattedPhone = useMemo(() => formatPhoneNumber(phoneRaw), [phoneRaw]);
   const formattedAmount = useMemo(() => formatAmountDisplay(amountRaw), [amountRaw]);
-
-  type ScannerModule = {
-    BarCodeScanner: ComponentType<BarCodeScannerProps>;
-    getPermissionsAsync?: () => Promise<PermissionResponse>;
-    requestPermissionsAsync: () => Promise<PermissionResponse>;
-  };
-
-  const barCodeScannerModuleRef = useRef<ScannerModule | null>(null);
-  const [scannerModule, setScannerModule] = useState<ScannerModule | null>(null);
-  const hasNativeScanner = Boolean(
-    (NativeModulesProxy as Record<string, unknown>)?.ExpoBarCodeScanner,
-  );
-
-  const loadScannerModule = useCallback(async () => {
-    if (barCodeScannerModuleRef.current) {
-      return barCodeScannerModuleRef.current;
-    }
-
-    try {
-      const module = await import("expo-barcode-scanner");
-      const resolved: ScannerModule = {
-        BarCodeScanner: module.BarCodeScanner,
-        getPermissionsAsync: module.getPermissionsAsync,
-        requestPermissionsAsync: module.requestPermissionsAsync,
-      };
-      barCodeScannerModuleRef.current = resolved;
-      setScannerModule(resolved);
-      return resolved;
-    } catch (error) {
-      barCodeScannerModuleRef.current = null;
-      throw error;
-    }
-  }, []);
 
   const didPrefill = useRef(false);
 
@@ -140,74 +103,64 @@ const MoneyTransferScreen = () => {
   }, [params.amount, params.contactName, params.note, params.phone]);
 
   useEffect(() => {
-    let isMounted = true;
     if (!scannerVisible) {
+      cameraPermissionRequestStarted.current = false;
       return;
     }
 
     setScannerPermission(null);
     setScannerError(null);
     hasHandledScan.current = false;
+    cameraPermissionRequestStarted.current = false;
+  }, [scannerVisible]);
 
-    if (!hasNativeScanner) {
-      setScannerPermission(false);
-      setScannerError(
-        "Este build de Expo Go no incluye el lector. Usa 'npm run start:classic' o un dev build personalizado.",
-      );
+  useEffect(() => {
+    if (!scannerVisible || !cameraPermission) {
       return;
     }
 
-    loadScannerModule()
-      .then(async (module) => {
-        if (!scannerModule) {
-          setScannerModule(module);
-        }
+    if (cameraPermission.granted) {
+      setScannerPermission(true);
+      return;
+    }
 
-        const initial = module.getPermissionsAsync
-          ? await module.getPermissionsAsync()
-          : await module.requestPermissionsAsync();
+    if (!cameraPermission.canAskAgain) {
+      setScannerPermission(false);
+      setScannerError("La cámara está bloqueada. Activa el permiso desde Ajustes para escanear.");
+      return;
+    }
 
+    if (cameraPermissionRequestStarted.current) {
+      return;
+    }
+
+    cameraPermissionRequestStarted.current = true;
+    let isMounted = true;
+    requestCameraPermission()
+      .then((requested) => {
         if (!isMounted) {
           return;
         }
-
-        if (initial?.status === "granted" || initial?.granted) {
-          setScannerPermission(true);
-          return;
+        setScannerPermission(requested.granted);
+        if (!requested.granted) {
+          setScannerError(
+            requested.canAskAgain
+              ? "Necesitas conceder acceso a la cámara para escanear códigos."
+              : "La cámara está bloqueada. Activa el permiso desde Ajustes para escanear.",
+          );
         }
-
-        const requested = await module.requestPermissionsAsync();
-        if (!isMounted) {
-          return;
-        }
-
-        const granted = Boolean(requested?.status === "granted" || requested?.granted);
-        if (granted) {
-          setScannerPermission(true);
-          return;
-        }
-
-        setScannerPermission(false);
-        setScannerError(
-          requested?.canAskAgain === false
-            ? "La cámara está bloqueada. Activa el permiso desde Ajustes para usar el escáner."
-            : "Necesitas conceder acceso a la cámara para escanear códigos.",
-        );
       })
       .catch(() => {
-        if (!isMounted) {
-          return;
+        if (isMounted) {
+          setScannerPermission(false);
+          setScannerError("No se pudo solicitar el permiso de cámara. Intenta nuevamente.");
         }
-        setScannerPermission(false);
-        setScannerError(
-          "No se pudo inicializar el escáner. Usa 'npm run start:classic' o un build personalizado.",
-        );
       });
 
     return () => {
       isMounted = false;
     };
-  }, [hasNativeScanner, loadScannerModule, scannerModule, scannerVisible]);
+  }, [cameraPermission, requestCameraPermission, scannerVisible]);
 
   const topContacts = useMemo(() => {
     return [...contacts]
@@ -342,7 +295,7 @@ const MoneyTransferScreen = () => {
     return { phone, amount, name, note };
   };
 
-  const handleBarCodeScanned = ({ data }: BarCodeScannerResult) => {
+  const handleBarCodeScanned = ({ data }: BarcodeScanningResult) => {
     if (hasHandledScan.current) {
       return;
     }
@@ -407,25 +360,13 @@ const MoneyTransferScreen = () => {
   };
 
   const shouldShowRecipientInput = showRecipientField || contactName.trim().length > 0;
-  const ScannerComponent: ComponentType<BarCodeScannerProps> | null = hasNativeScanner
-    ? scannerModule?.BarCodeScanner ?? null
-    : null;
-
   const requestScannerPermission = useCallback(async () => {
     setScannerError(null);
-    if (!hasNativeScanner) {
-      setScannerError(
-        "Este build de Expo Go no incluye el lector. Usa 'npm run start:classic' o un dev build personalizado.",
-      );
-      return;
-    }
     setRequestingPermission(true);
     try {
-      const module = await loadScannerModule();
-      const result = await module.requestPermissionsAsync();
-      const granted = Boolean(result?.status === "granted" || result?.granted);
-      setScannerPermission(granted);
-      if (!granted) {
+      const result = await requestCameraPermission();
+      setScannerPermission(result.granted);
+      if (!result.granted) {
         setScannerError(
           result?.canAskAgain === false
             ? "La cámara está bloqueada. Activa el permiso desde Ajustes para usar el escáner."
@@ -438,7 +379,7 @@ const MoneyTransferScreen = () => {
     } finally {
       setRequestingPermission(false);
     }
-  }, [hasNativeScanner, loadScannerModule]);
+  }, [requestCameraPermission]);
 
   return (
     <FuturisticBackground>
@@ -756,31 +697,28 @@ const MoneyTransferScreen = () => {
                 {scannerError ? (
                   <Text style={styles.scannerError}>{scannerError}</Text>
                 ) : null}
+                {cameraPermission?.canAskAgain ? (
+                  <PrimaryButton
+                    label={requestingPermission ? "Solicitando…" : "Permitir cámara"}
+                    onPress={requestScannerPermission}
+                    disabled={requestingPermission}
+                    style={styles.permissionButton}
+                  />
+                ) : null}
               </View>
-            ) : scannerPermission && ScannerComponent ? (
+            ) : scannerPermission ? (
               <View style={styles.scannerViewport}>
-                <ScannerComponent
-                  onBarCodeScanned={handleBarCodeScanned}
-                  style={StyleSheet.absoluteFillObject}
+                <CameraView
+                  facing="back"
+                  barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+                  onBarcodeScanned={handleBarCodeScanned}
+                  style={StyleSheet.absoluteFill}
                 />
                 <View style={styles.scannerOverlay}>
                   <View style={styles.scannerReticle} />
                 </View>
               </View>
-            ) : (
-              <View style={styles.scannerPlaceholder}>
-                <ActivityIndicator color={palette.accentCyan} size="large" />
-                <Text style={styles.scannerHint}>
-                  {scannerError ?? "Necesitamos tu permiso para usar la cámara."}
-                </Text>
-                <PrimaryButton
-                  label={requestingPermission ? "Solicitando…" : "Permitir cámara"}
-                  onPress={requestScannerPermission}
-                  disabled={requestingPermission}
-                  style={styles.permissionButton}
-                />
-              </View>
-            )}
+            ) : null}
             <Text style={styles.scannerFooter}>
               Aceptamos códigos con formato JSON, query string o lista clave-valor.
             </Text>
